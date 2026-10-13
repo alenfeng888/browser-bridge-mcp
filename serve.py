@@ -119,9 +119,9 @@ class Hub:
         try:
             await asyncio.wait_for(self.up.wait(), timeout=30)
         except asyncio.TimeoutError:
-            raise RuntimeError("扩展未连上：native messaging 注册装好了吗？(edge://extensions 看 Local Ext Bridge 是否启用)")
+            raise RuntimeError("Extension not connected: is native messaging registered? (edge://extensions -> check 'Local Ext Bridge' is enabled)")
         if self.writer is None:
-            raise RuntimeError("扩展已断开，等它重连（SW 休眠约 30s，可重试）")
+            raise RuntimeError("Extension disconnected; wait for it to reconnect (SW sleeps ~30s, retry)")
         self.seq += 1
         i = self.seq
         fut = asyncio.get_running_loop().create_future()
@@ -134,9 +134,9 @@ class Hub:
             m = await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self.waiters.pop(i, None)
-            raise RuntimeError("扩展无响应（SW 可能刚休眠，重试一次）")
+            raise RuntimeError("Extension not responding (SW may have just gone to sleep; retry once)")
         if "error" in m:
-            raise RuntimeError("扩展报错: " + m["error"])
+            raise RuntimeError("Extension error: " + m["error"])
         return m.get("result")
 
     async def cli_handler(self, reader, writer):
@@ -213,7 +213,7 @@ def write_last(t):
 def get_tab():
     t = read_last().get("tab")
     if not t:
-        raise SystemExit("没有记住的 tab：先 list / open / use")
+        raise SystemExit("No remembered tab: run list / open / use first")
     return t
 
 

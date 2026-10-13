@@ -134,10 +134,11 @@ var BridgeCore = (function () {
       args: [],
       func: () => {
         try {
-          // ── uid 指纹 ────────────────────────────────────────────
-          // 稳定标识，优先级 id > name > data-testid > aria-label > 文本hash+DOM路径。
-          // 无状态：uid 本身就是重查钥匙（resolveUidInTab 用同一算法反查），
-          // 不存 SW 内存，SW 半路死掉也不失效。
+          // ── uid fingerprint ─────────────────────────────────────
+          // Stable identifier, priority: id > name > data-testid > aria-label
+          // > text-hash+DOM-path. Stateless: the uid itself is the lookup key
+          // (resolveUidInTab reverses it with the same algorithm), so it never
+          // lives in SW memory and survives the service worker dying mid-run.
           function h(s) {
             var x = 5381;
             for (var i = 0; i < s.length; i++) x = ((x << 5) + x + s.charCodeAt(i)) | 0;
@@ -267,8 +268,8 @@ var BridgeCore = (function () {
   // silently (it used to answer {"ok":true} while the dialog stayed open).
   // The only clean
   // cure is chrome.debugger: Input.dispatchMouseEvent/KeyEvent are trusted
-  // by the page. Cost: the "正在调试此浏览器" infobar shows while attached,
-  // so attach -> act -> detach, always.
+  // by the page. Cost: the debugger infobar ("正在调试此浏览器" / "Start debugging
+  // this browser") shows while attached, so attach -> act -> detach, always.
 
   function dbgAttach(tabId) {
     return new Promise((resolve, reject) => {
@@ -399,9 +400,10 @@ var BridgeCore = (function () {
     return { ok: true, real: true, typed: String(text || '').length, submitted: !!submit };
   }
 
-  // ── wait_for：单次轻探针（轮询循环在 server.js 侧）─────────────────
-  // 探针走 ISOLATED func 注入（CSP 免疫）——绝不能走 evalInTab 的 MAIN eval，
-  // 页面 CSP 无 unsafe-eval 时那条路会挂。
+  // ── wait_for: single lightweight probe (polling loop lives in server.js) ──
+  // The probe is injected as an ISOLATED-world func (CSP-immune) - it must
+  // never go through evalInTab's MAIN eval, which dies on pages whose CSP
+  // lacks unsafe-eval.
   async function probeInTab(tabId, kind, value) {
     const results = await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
@@ -423,7 +425,7 @@ var BridgeCore = (function () {
         }
       },
     });
-    // 任一 frame 命中即算命中（对齐 textInTab 的 allFrames 语义）
+    // a hit in ANY frame counts (matches textInTab's allFrames semantics)
     for (const r of results || []) {
       if (r && r.result && r.result.__error) throw new Error(r.result.__error);
       if (r && r.result && r.result.matched) return { matched: true };
@@ -431,8 +433,9 @@ var BridgeCore = (function () {
     return { matched: false };
   }
 
-  // ── uid 反查（与 snapshotInTab 的 uidOf 同一算法）──────────────────
-  // 全 DOM 查找，不受快照白名单限制——所以能摸到终端容器这类白名单外元素。
+  // ── uid reverse lookup (same algorithm as snapshotInTab's uidOf) ──────
+  // Searches the whole DOM, not just the snapshot whitelist - which is how it
+  // reaches whitelist-excluded elements like terminal containers.
   async function resolveUidInTab(tabId, uid) {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
@@ -496,7 +499,7 @@ var BridgeCore = (function () {
             el = walkPath(document.documentElement, segs);
             if (el) {
               const t = (el.innerText || el.value || '').trim().slice(0, 80);
-              if (h(t) !== want) el = null; // 路径还在但文本变了 → 回退全 DOM 找
+              if (h(t) !== want) el = null; // path intact but text changed -> fall back to whole-DOM search
             }
             if (!el) {
               for (const c of document.querySelectorAll('*')) {
@@ -536,7 +539,8 @@ var BridgeCore = (function () {
   async function typeByUidInTab(tabId, uid, text, submit) {
     const t0 = Date.now();
     const pos = await resolveUidInTab(tabId, uid);
-    // 先真点击聚焦——这是治"typed:N 回 ok 但没落地"的根：点中了才有焦点。
+    // Real click first to grab focus - the root cure for "typed:N returned ok
+    // but nothing landed": focus only exists after a real click.
     await dbgAttach(tabId);
     try {
       const common = { x: pos.x, y: pos.y, button: 'left', clickCount: 1 };
@@ -689,7 +693,7 @@ var BridgeCore = (function () {
         return { ok: true, version: v };
       }
 
-      // Self-reload: the AI equivalent of clicking 重新加载 on
+      // Self-reload: the AI equivalent of clicking the extension card's Reload
       // edge://extensions - which we cannot do directly because chrome://
       // pages refuse script injection. The service worker dies mid-call, so
       // the caller should treat "connection dropped right after this" as

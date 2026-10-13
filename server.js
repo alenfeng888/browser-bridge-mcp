@@ -1176,7 +1176,7 @@ async function callTool(name, args) {
         try {
           probe = await call('probe', { tabId, kind, value }, 'probe', { tabId, kind, value });
         } catch (e) {
-          probe = { err: e.message }; // 页面导航/注入失败 → 当作未命中继续等
+          probe = { err: e.message }; // navigation/injection failure -> treat as not-matched, keep waiting
         }
         if (probe && probe.matched) {
           return { ok: true, matched: true, timeout: false, waitedMs: Date.now() - t0 };
@@ -1203,7 +1203,7 @@ async function callTool(name, args) {
         return result;
       } catch (e) {
         // throws from resolveUidInTab (uid not found / not visible) -> {ok:false}
-        return { ok: false, reason: e.message.replace(/^扩展报错:\s*/, ''), uid: args.uid };
+        return { ok: false, reason: e.message.replace(/^(?:扩展报错|Extension error):\s*/, ''), uid: args.uid };
       }
     }
 
@@ -1215,7 +1215,7 @@ async function callTool(name, args) {
         if (result && result.__error) return { ok: false, reason: result.__error, uid: args.uid, typed: 0 };
         return result;
       } catch (e) {
-        return { ok: false, reason: e.message.replace(/^扩展报错:\s*/, ''), uid: args.uid, typed: 0 };
+        return { ok: false, reason: e.message.replace(/^(?:扩展报错|Extension error):\s*/, ''), uid: args.uid, typed: 0 };
       }
     }
 
