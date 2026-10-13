@@ -100,8 +100,14 @@ def main():
     # Drive the router exactly like `serve.py list` does, over the CLI port.
     reply = None
     try:
-        s = socket.create_connection(("127.0.0.1", 8766), timeout=25)
-        s.sendall((json.dumps({"cmd": "list_tabs", "arg": {}, "timeout": 20}) + "\n").encode("utf-8"))
+        tok = os.environ.get("EXT_BRIDGE_TOKEN", "").strip()
+        if not tok:
+            with open(os.path.join(os.path.expanduser("~"), ".ext_bridge_token"),
+                      encoding="utf-8") as f:
+                tok = f.read().strip()
+        s = socket.create_connection(("127.0.0.1", int(os.environ.get("EXT_BRIDGE_CLI_PORT", "8766"))), timeout=25)
+        s.sendall((json.dumps({"cmd": "list_tabs", "arg": {}, "timeout": 20,
+                               "token": tok}) + "\n").encode("utf-8"))
         buf = b""
         while not buf.endswith(b"\n"):
             chunk = s.recv(1 << 20)

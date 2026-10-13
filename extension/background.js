@@ -35,7 +35,7 @@ const BRIDGE_HTTP = (typeof BRIDGE_CONFIG !== 'undefined' && BRIDGE_CONFIG.httpB
 // the same value to ~/.ext_bridge_ext_token (server side) and config.js (here).
 const BRIDGE_EXT_TOKEN = (typeof BRIDGE_CONFIG !== 'undefined' && BRIDGE_CONFIG.extToken) || '';
 let polling = false;
-// Heartbeat + generation guard. 回执 v2 P0: a dead poll loop left `polling`
+// Heartbeat + generation guard: a dead poll loop once left `polling`
 // true forever, so every wake event hit `if (polling) return` and the queue
 // went silent (waiters:0, pending piling up) until a manual re-reload.
 // Now each loop beats and carries a generation; startPolling() only skips

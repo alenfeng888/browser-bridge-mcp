@@ -7,6 +7,13 @@ Two TCP listeners (used only by us, never by the browser):
   127.0.0.1:8765  <- native host subprocesses check in here
   127.0.0.1:8766  <- this script's CLI talks here (one JSON object per line)
 
+Both ports are gated on the bridge token (~/.ext_bridge_token, override with
+EXT_BRIDGE_TOKEN): CLI requests must carry it as "token"; a native host must
+send {"__hello__": {"token": ...}} as its first frame. serve mode refuses to
+start without a readable token (fail closed) - start the resident server once
+(`node server.js`) or set the env var. Ports overridable via
+EXT_BRIDGE_NATIVE_PORT / EXT_BRIDGE_CLI_PORT for isolated test instances.
+
 Usage:
   python serve.py serve                 # start the router (run in background)
   python serve.py list                  # tabs in the user's real Edge
@@ -31,9 +38,26 @@ import struct
 import sys
 
 HOST = "127.0.0.1"
-NATIVE_PORT = 8765
-CLI_PORT = 8766
+NATIVE_PORT = int(os.environ.get("EXT_BRIDGE_NATIVE_PORT", "8765"))
+CLI_PORT = int(os.environ.get("EXT_BRIDGE_CLI_PORT", "8766"))
 LAST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_tab.json")
+
+
+def load_token():
+    """The shared local secret. Never auto-generated here: the resident
+    server (server.js) owns generation, this process only consumes."""
+    tok = os.environ.get("EXT_BRIDGE_TOKEN", "").strip()
+    if tok:
+        return tok
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".ext_bridge_token"),
+                  encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+TOKEN = load_token()
 
 
 class Hub:
@@ -46,6 +70,24 @@ class Hub:
         self.waiters = {}
 
     async def accept_native(self, reader, writer):
+        # Handshake gate: without the token you do not get the browser.
+        try:
+            hdr = await asyncio.wait_for(reader.readexactly(4), timeout=5)
+            n = struct.unpack("<I", hdr)[0]
+            if n > 1024 * 1024:
+                raise ValueError("hello frame too large")
+            hello = json.loads((await reader.readexactly(n)).decode("utf-8"))
+            if str(hello.get("__hello__", {}).get("token", "")) != TOKEN:
+                print("rejected 8765 client: bad hello token", flush=True)
+                writer.close()
+                return
+        except Exception as e:  # noqa: BLE001
+            print("rejected 8765 client: %s" % e, flush=True)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
         self.writer = writer
         self.up.set()
         print("extension native port up", flush=True)
@@ -101,12 +143,15 @@ class Hub:
         try:
             data = await reader.read(1 << 20)
             req = json.loads(data.decode("utf-8"))
-            try:
-                res = await self.call_native(req["cmd"], req.get("arg"),
-                                             req.get("timeout", 35))
-                reply = {"ok": True, "result": res}
-            except Exception as e:  # noqa: BLE001
-                reply = {"ok": False, "error": str(e)}
+            if str(req.get("token", "")) != TOKEN:
+                reply = {"ok": False, "error": "unauthorized: bad or missing token"}
+            else:
+                try:
+                    res = await self.call_native(req["cmd"], req.get("arg"),
+                                                 req.get("timeout", 35))
+                    reply = {"ok": True, "result": res}
+                except Exception as e:  # noqa: BLE001
+                    reply = {"ok": False, "error": str(e)}
         except Exception as e:  # noqa: BLE001
             reply = {"ok": False, "error": "parse: " + str(e)}
         writer.write(json.dumps(reply, ensure_ascii=False).encode("utf-8") + b"\n")
@@ -123,7 +168,7 @@ hub = Hub()
 async def serve_forever():
     nat = await asyncio.start_server(hub.accept_native, HOST, NATIVE_PORT)
     cli = await asyncio.start_server(hub.cli_handler, HOST, CLI_PORT)
-    print(f"ext_bridge up: native 127.0.0.1:{NATIVE_PORT}  cli 127.0.0.1:{CLI_PORT}",
+    print(f"ext_bridge up: native 127.0.0.1:{NATIVE_PORT}  cli 127.0.0.1:{CLI_PORT}  (both token-gated)",
           flush=True)
     try:
         await asyncio.Future()
@@ -136,7 +181,8 @@ async def serve_forever():
 
 def cli_call(cmd, arg=None, timeout=35):
     with socket.create_connection((HOST, CLI_PORT), timeout=timeout + 30) as s:
-        s.sendall((json.dumps({"cmd": cmd, "arg": arg, "timeout": timeout},
+        s.sendall((json.dumps({"cmd": cmd, "arg": arg, "timeout": timeout,
+                               "token": TOKEN},
                               ensure_ascii=False) + "\n").encode("utf-8"))
         buf = b""
         while not buf.endswith(b"\n"):
@@ -175,6 +221,11 @@ def main():
     cmd = sys.argv[1]
 
     if cmd == "serve":
+        if not TOKEN:
+            raise SystemExit(
+                "serve.py: no bridge token. Start the resident server once "
+                "(node server.js) so it creates ~/.ext_bridge_token, or set "
+                "EXT_BRIDGE_TOKEN. Refusing to run unauthenticated ports.")
         while True:
             try:
                 asyncio.run(serve_forever())

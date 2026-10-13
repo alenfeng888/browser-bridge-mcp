@@ -1,5 +1,6 @@
 node_modules/
 extension/config.js
+ext_bridge.json
 *.log
 *.png
 *.bak*

@@ -1,5 +1,11 @@
 const st = document.getElementById("st");
 
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
 function show() {
   chrome.runtime.sendMessage({ cmd: "ping_status" }, (r) => {
     if (!r) {
@@ -14,7 +20,7 @@ function show() {
       lines.push('<span class="err">两条路都没起来，点下面重连</span>');
     }
     if (r.lastError) {
-      lines.push('<span class="err">' + String(r.lastError).slice(0, 160) + '</span>');
+      lines.push('<span class="err">' + esc(String(r.lastError).slice(0, 160)) + '</span>');
     }
     lines.push('<span style="opacity:.6">详细状态: node server.js status</span>');
     st.innerHTML = lines.join('<br>');

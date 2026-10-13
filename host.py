@@ -79,13 +79,33 @@ def pump_stdin(sock, stop):
             pass
 
 
-def main():
+def load_token():
+    tok = os.environ.get("EXT_BRIDGE_TOKEN", "").strip()
+    if tok:
+        return tok
     try:
-        sock = socket.create_connection((HOST, PORT), timeout=5)
-    except Exception as e:
-        sys.stderr.write("router unreachable on %s:%d (%s)\n" % (HOST, PORT, e))
+        with open(os.path.join(os.path.expanduser("~"), ".ext_bridge_token"),
+                  encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def main():
+    token = load_token()
+    if not token:
+        sys.stderr.write("no bridge token (~/.ext_bridge_token / EXT_BRIDGE_TOKEN)\n")
         sys.stderr.flush()
         return 2
+    port = int(os.environ.get("EXT_BRIDGE_NATIVE_PORT", PORT))
+    try:
+        sock = socket.create_connection((HOST, port), timeout=5)
+    except Exception as e:
+        sys.stderr.write("router unreachable on %s:%d (%s)\n" % (HOST, port, e))
+        sys.stderr.flush()
+        return 2
+    # Handshake: the router gates the browser behind this token.
+    send_line(sock, json.dumps({"__hello__": {"token": token}}).encode("utf-8"))
     sock.settimeout(None)
     stop = threading.Event()
 

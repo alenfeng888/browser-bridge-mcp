@@ -66,8 +66,8 @@ var BridgeCore = (function () {
           let el;
           if (/^e\d+$/.test(selector)) {
             // SAME filtering as snapshotInTab/clickInTab - refs are indices
-            // into the filtered list (回执 P1-1: type used to be CSS-only,
-            // which dead-ends the snapshot->type flow on CSP pages).
+            // into the filtered list (type used to be CSS-only only, which
+            // dead-ended the snapshot->type flow on CSP pages).
             const els = document.querySelectorAll('a, button, input, select, textarea, [role="button"], [role="link"], [onclick]');
             const want = parseInt(selector.slice(1), 10);
             let n = 0;
@@ -107,8 +107,8 @@ var BridgeCore = (function () {
   // Fixed operations below deliberately do NOT go through evalInTab: they use
   // executeScript's `func` + `args` (same pattern as typeInTab), so the code
   // is serialised by the extension API itself and never runs through eval().
-  // That makes them immune to strict page CSP (Bing, modelscope, ...), where
-  // the eval route dies with "unsafe-eval not allowed" (回执 P1, 2026-10-09).
+  // That makes them immune to strict page CSP (search engines, web IDEs, ...),
+  // where the eval route dies with "unsafe-eval not allowed".
 
   async function textInTab(tabId) {
     // allFrames: pages whose app lives in a cross-origin iframe (Huawei Cloud
@@ -134,7 +134,7 @@ var BridgeCore = (function () {
       args: [],
       func: () => {
         try {
-          // ── uid 指纹（P0-2, 2026-10-11）─────────────────────────────
+          // ── uid 指纹 ────────────────────────────────────────────
           // 稳定标识，优先级 id > name > data-testid > aria-label > 文本hash+DOM路径。
           // 无状态：uid 本身就是重查钥匙（resolveUidInTab 用同一算法反查），
           // 不存 SW 内存，SW 半路死掉也不失效。
@@ -264,7 +264,8 @@ var BridgeCore = (function () {
   //
   // el.click() produces an untrusted event (isTrusted=false). antd5 modals -
   // and any component listening for real pointer sequences - ignore them
-  // silently (回执 P1-2: {"ok":true} but the dialog stays). The only clean
+  // silently (it used to answer {"ok":true} while the dialog stayed open).
+  // The only clean
   // cure is chrome.debugger: Input.dispatchMouseEvent/KeyEvent are trusted
   // by the page. Cost: the "正在调试此浏览器" infobar shows while attached,
   // so attach -> act -> detach, always.
@@ -398,9 +399,9 @@ var BridgeCore = (function () {
     return { ok: true, real: true, typed: String(text || '').length, submitted: !!submit };
   }
 
-  // ── P0-1 wait_for：单次轻探针（轮询循环在 server.js 侧）─────────────
+  // ── wait_for：单次轻探针（轮询循环在 server.js 侧）─────────────────
   // 探针走 ISOLATED func 注入（CSP 免疫）——绝不能走 evalInTab 的 MAIN eval，
-  // 魔搭页 CSP 无 unsafe-eval 会挂（需求包验收线①恰恰指定魔搭场景）。
+  // 页面 CSP 无 unsafe-eval 时那条路会挂。
   async function probeInTab(tabId, kind, value) {
     const results = await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
@@ -430,7 +431,7 @@ var BridgeCore = (function () {
     return { matched: false };
   }
 
-  // ── P0-2 uid 反查（与 snapshotInTab 的 uidOf 同一算法）──────────────
+  // ── uid 反查（与 snapshotInTab 的 uidOf 同一算法）──────────────────
   // 全 DOM 查找，不受快照白名单限制——所以能摸到终端容器这类白名单外元素。
   async function resolveUidInTab(tabId, uid) {
     const [{ result }] = await chrome.scripting.executeScript({
@@ -667,8 +668,11 @@ var BridgeCore = (function () {
         return { data: dataUrl.replace(/^data:image\/\w+;base64,/, ''), dataUrl };
       }
 
-      case 'cookies':
-        return await chrome.cookies.getAll({ url: p.url || p.domain });
+      case 'cookies': {
+        // Names/domains only - cookie VALUES never leave the extension.
+        const all = await chrome.cookies.getAll({ url: p.url || p.domain });
+        return (all || []).map((c) => ({ name: c.name, domain: c.domain, path: c.path }));
+      }
 
       case 'probe':
         return await probeInTab(p.tabId, p.kind, p.value);

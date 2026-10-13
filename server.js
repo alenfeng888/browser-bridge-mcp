@@ -61,10 +61,12 @@ const seenOrigins = new Set();
 // a speed bump (anything local can read both files) but it stops drive-by
 // callers that know the port and nothing else.
 //
-// It arms itself: until a request carrying the right secret has been seen,
-// unauthenticated /extension/* calls are still honoured, so a not-yet-reloaded
-// extension keeps working. The moment the reloaded extension checks in, the
-// endpoint locks down for good.
+// Arming: unauthenticated /extension/* calls are honoured only during a
+// startup grace window (default 180s) so a not-yet-reloaded / slow-to-wake
+// extension keeps working after a server restart. Once the extension checks
+// in with the right secret - or the window expires - the endpoint locks down
+// for good. If no secret is paired at all, the endpoints stay open (with a
+// loud warning below): that is the documented fresh-install state.
 
 const EXT_TOKEN_FILE = path.join(os.homedir(), '.ext_bridge_ext_token');
 let EXT_TOKEN = process.env.EXT_BRIDGE_EXT_TOKEN || '';
@@ -76,6 +78,8 @@ if (!EXT_TOKEN) {
   }
 }
 let extTokenSeen = false;
+const EXT_GRACE_MS = Math.max(Number(process.env.EXT_BRIDGE_GRACE_MS || 180000), 0);
+const SERVER_STARTED_AT = Date.now();
 
 function extensionOriginOk(req) {
   const origin = req.headers['origin'];
@@ -93,12 +97,25 @@ function extensionOriginOk(req) {
     return true;
   }
 
-  // Not yet armed: let legacy (pre-reload) callers through, but say so.
-  if (!extTokenSeen) return true;
+  // Not armed yet. Two legitimately-open cases, both logged:
+  //  1) no secret paired at all (fresh install) - permanently open by design;
+  //  2) paired but within the startup grace window (extension still waking).
+  // Everything else is rejected.
+  if (!EXT_TOKEN) {
+    console.error('[bridge] /extension/* open: no extension secret paired (run scripts/pair.ps1)');
+    return true;
+  }
+  if (!extTokenSeen && Date.now() - SERVER_STARTED_AT < EXT_GRACE_MS) {
+    const left = Math.ceil((EXT_GRACE_MS - (Date.now() - SERVER_STARTED_AT)) / 1000);
+    console.error(`[bridge] /extension/* grace-window call accepted (${left}s of window left)`);
+    return true;
+  }
 
-  // Armed and this caller has no secret. Still allow the expected extension
-  // origin in case a browser strips custom headers on these fetches.
-  if (origin === EXPECTED_ORIGIN) {
+  // Locked. Optionally still allow a configured extension origin, in case a
+  // browser strips custom headers on these fetches - but ONLY when the
+  // operator actually set EXT_BRIDGE_ORIGIN (an empty expectation must never
+  // match an empty Origin header: raw local callers can send one).
+  if (EXPECTED_ORIGIN && origin === EXPECTED_ORIGIN) {
     console.error('[bridge] /extension/* without secret but from our own origin - allowed');
     return true;
   }
@@ -268,6 +285,22 @@ class Bridge extends EventEmitter {
     });
 
     server.on('upgrade', (req, socket) => {
+      // The extension (0.3.7+) no longer uses the WebSocket transport at all -
+      // queue polling and native messaging cover it. A WS handshake carries no
+      // usable credential (browsers cannot attach custom headers), so an
+      // unauthenticated upgrade lets any local process - or any http:// page,
+      // WS is exempt from CORS - hijack the extension socket slot. Reject by
+      // default; set EXT_BRIDGE_ALLOW_WS=1 only if you really need the route.
+      if (process.env.EXT_BRIDGE_ALLOW_WS !== '1') {
+        try {
+          socket.write('HTTP/1.1 426 Upgrade Required\r\n' +
+            'Content-Type: text/plain\r\nConnection: close\r\n\r\n' +
+            'WS transport disabled (no auth). Set EXT_BRIDGE_ALLOW_WS=1 to re-enable.\n');
+          socket.end();
+        } catch {}
+        console.error(`[bridge] rejected WS upgrade from origin=${req.headers.origin || 'none'}`);
+        return;
+      }
       const key = req.headers['sec-websocket-key'];
       if (!key) {
         socket.destroy();
@@ -574,21 +607,8 @@ const TOOLS = [
     },
   },
   {
-    name: 'k13_exec',
-    // ★指令29号 R3（主审按需穿透的手术刀，非常驻巡检）
-    description: 'Run a shell command on the ModelScope DSW instance through the existing kernel exec channel (13_exec.js). The workspace tab is auto-resolved by URL, so no tabId is needed and a browser restart cannot break it.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        cmd: { type: 'string', description: 'Shell command to run on the DSW instance' },
-        waitMs: { type: 'number', description: 'How long to wait for output (default 90000)' },
-      },
-      required: ['cmd'],
-    },
-  },
-  {
     name: 'browser_wait_for',
-    description: 'Wait until a condition appears on the page, then return. Polls a CSP-safe ISOLATED-world probe every intervalMs (works on modelscope where MAIN-world eval dies). NEVER throws on timeout - returns {ok:false, timeout:true}. Probe kinds: text (default, visible text contains), selector (CSS selector visible), predicate (custom JS via MAIN-world eval - FAILS on strict-CSP pages like modelscope).',
+    description: 'Wait until a condition appears on the page, then return. Polls a CSP-safe ISOLATED-world probe every intervalMs (works on strict-CSP sites where MAIN-world eval dies). NEVER throws on timeout - returns {ok:false, timeout:true}. Probe kinds: text (default, visible text contains), selector (CSS selector visible), predicate (custom JS via MAIN-world eval - FAILS on strict-CSP pages).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -828,7 +848,7 @@ function callCli(cmd, arg, timeoutMs = 35000) {
       fn(v);
     };
     sock.on('connect', () => {
-      sock.write(JSON.stringify({ cmd, arg: arg || {}, timeout: timeoutMs / 1000 }) + '\n');
+      sock.write(JSON.stringify({ cmd, arg: arg || {}, timeout: timeoutMs / 1000, token: BRIDGE_TOKEN }) + '\n');
     });
     sock.on('data', (d) => {
       buf += d.toString('utf8');
@@ -866,9 +886,9 @@ function callCli(cmd, arg, timeoutMs = 35000) {
 //   2. ws    - offscreen socket, lowest latency when it is healthy
 //   3. cli   - serve.py over native messaging
 let preferredRoute = 'queue';
-// 会诊回1 Q6 P0-b（指令27授权）：sticky 的过期判据必须是"该路由**最近一次成功**的
-// 时间"，而不是"被钉住的时间"。旧实现每次成功都刷新 preferredRouteAt，等于
-// 路只要每 5 分钟成功过一次就永不过期——死路被永久优先。
+// Sticky expiry must key off each route's LAST SUCCESS, not the moment it was
+// pinned: refreshing the timestamp on every success would let a route that
+// succeeds once per 5 minutes never expire - a dead route stays preferred.
 const lastSuccessAt = { queue: 0, ws: 0, cli: 0 };
 
 // A sticky route that never expires is worse than no sticky at all: once the
@@ -892,9 +912,10 @@ async function call(method, params, cliCmd, cliArg) {
       ? ['cli', 'queue', 'ws']
       : ['queue', 'ws', 'cli'];
 
-  // ws 死路清理（会诊回1 Q6 P0-b，指令27授权）：offscreen 已移除后 ws 只是
-  // 常驻 extension socket。socket 不在就别让它占 order 位——白耗 8s 超时才
-  // fall through。在就从 order 剔除，pin 的 ws 也一并降级回 queue。
+  // ws dead-path cleanup: since the offscreen document was removed, 'ws' is
+  // only the resident extension socket. If no socket is attached, drop ws from
+  // the order instead of burning its 8s timeout, and demote a ws-pinned
+  // sticky back to queue.
   let order = baseOrder;
   if (order.includes('ws') && !bridge.isConnected()) {
     order = order.filter((r) => r !== 'ws');
@@ -952,10 +973,10 @@ async function resolveTabId(explicit) {
 
 // ── Tool Implementation ───────────────────────────────────────────────
 
-// Input events only take effect on the VISIBLE tab (回执 v2 P1: background
-// tabs return ok:true but the UI ignores synthetic and even CDP-real clicks
-// and keys - the renderer throttles them). Wrap every input operation:
-// switch to the target -> act -> switch back to what the user was reading.
+// Input events only take effect on the VISIBLE tab: background tabs return
+// ok:true but the renderer throttles synthetic and even CDP-real clicks/keys.
+// Wrap every input operation: switch to the target -> act -> switch back to
+// what the user was reading.
 async function withForeground(tabId, fn) {
   const tabs = await call('list_tabs', {}, 'list_tabs', {});
   const target = tabs.find((t) => t.id === tabId);
@@ -1099,33 +1120,6 @@ async function callTool(name, args) {
       return { ok: true, tabId };
     }
 
-    // ★指令29号 R3（主审按需穿透的手 = 手术刀，不是巡逻队）：tabId 自找 workspace 页
-    // （同 A5 修法：按 URL 认领，浏览器重启改 id 也不废），走既有 13_exec.js 流程，
-    // 复用现成协议，不新造。
-    case 'k13_exec': {
-      const cmd = String(args.cmd || '');
-      if (!cmd) throw new Error('k13_exec: cmd 不能为空');
-      const waitMs = Number(args.waitMs || 90000);
-      const tabs = await call('list_tabs', {}, 'list_tabs', {});
-      const ws = tabs.find((t) => /modelscope\.cn\/code\/workspace/.test(t.url || ''))
-        || tabs.find((t) => t.id === Number(args.tabId || 0))
-        || tabs.find((x) => x.active) || tabs[0];
-      if (!ws) throw new Error('k13_exec: 找不到可用页签');
-      const r = await new Promise((resolve) => {
-        const child = spawn(process.execPath, [path.join(__dirname, '13_exec.js'), cmd, String(waitMs)], {
-          cwd: __dirname, windowsHide: true,
-          env: Object.assign({}, process.env, { MOTA_IDE_TAB: String(ws.id) }),
-        });
-        let out = ''; let err = '';
-        child.stdout.on('data', (d) => (out += d));
-        child.stderr.on('data', (d) => (err += d));
-        const t = setTimeout(() => { try { child.kill(); } catch {} }, waitMs + 45000);
-        child.on('close', (code) => { clearTimeout(t); resolve({ code, out: out.trim(), err: err.trim() }); });
-        child.on('error', (e) => { clearTimeout(t); resolve({ code: -1, out: '', err: e.message }); });
-      });
-      return { ok: r.code === 0, exitCode: r.code, tabId: ws.id, stdout: r.out, stderr: r.err };
-    }
-
     case 'browser_scroll': {
       const dir = args.direction || 'down';
       const amount = args.amount || 500;
@@ -1137,9 +1131,10 @@ async function callTool(name, args) {
       return result;
     }
 
-    // ── P0-1 wait_for（2026-10-11 需求包§二）：轮询循环在 server 侧，
-    // 每次注入一个 ISOLATED 轻探针 → SW 每次注入都刷新存活、事件循环空闲
-    // 可响应别的命令（验收线③）。超时只回 ok:false，绝不 throw（验收线②）。
+    // ── wait_for: polling loop lives on the server side. Each tick injects a
+    // single ISOLATED-world probe - every injection refreshes the worker's
+    // liveness and leaves its event loop free for other commands. On timeout
+    // this returns {ok:false,timeout:true}; it never throws.
     case 'browser_wait_for': {
       const tabId = Number(args.tabId);
       if (!tabId) throw new Error('wait_for: tabId required');
@@ -1152,10 +1147,11 @@ async function callTool(name, args) {
       const intervalMs = Math.max(Number(args.intervalMs || 500), 200);
       const t0 = Date.now();
       if (kind === 'predicate') {
-        // 语义（B4 修正，2026-10-11 opencode 回归）：与 text/selector 对齐进轮询——
-        //   eval 返回真 → matched；返回假 → 继续等到 timeoutMs 回 {timeout:true}；
-        //   eval 抛错（CSP 页）或卡死 → 立即回 {error}，不吞成超时。
-        // 所有 return 统一带 timeout 标志（P1-接口一致性）。
+        // Predicate semantics align with text/selector: poll until truthy ->
+        // matched; falsy keeps polling until timeoutMs -> {timeout:true};
+        // an eval throw (strict-CSP page) or a hang returns {error}
+        // immediately, never swallowed into a timeout. Every return carries
+        // the timeout flag.
         for (;;) {
           let r = null;
           try {
@@ -1194,8 +1190,10 @@ async function callTool(name, args) {
       }
     }
 
-    // ── P0-2 uid 定位（2026-10-11 需求包§二）：快照 uid → 指纹反查 → CDP 真点击。
-    // resolveUidInTab 找不到时回 {ok:false,...}，不 throw（桥不挂，调用方自行决定重试/降级坐标）。
+    // ── uid targeting: snapshot uid -> fingerprint re-lookup -> real CDP click.
+    // When resolveUidInTab finds nothing this returns {ok:false,...} instead of
+    // throwing, so the bridge stays alive and the caller decides (retry / fall
+    // back to coordinates).
     case 'browser_click_by_uid': {
       try {
         const { result } = await withForeground(args.tabId, async () =>
@@ -1204,7 +1202,7 @@ async function callTool(name, args) {
         if (result && result.__error) return { ok: false, reason: result.__error, uid: args.uid };
         return result;
       } catch (e) {
-        // resolveUidInTab 的 throw（扩展报错: uid not found / not visible）→ 转 {ok:false}，桥不挂
+        // throws from resolveUidInTab (uid not found / not visible) -> {ok:false}
         return { ok: false, reason: e.message.replace(/^扩展报错:\s*/, ''), uid: args.uid };
       }
     }
@@ -1585,7 +1583,7 @@ function startStdioBridge() {
 //   node server.js mcp             MCP stdio bridge -> resident server
 //   node server.js list|open|...   CLI -> resident server
 
-const VERSION = '0.3.7';
+const VERSION = '0.4.1';
 
 const MODE = process.argv[2];
 
@@ -1603,12 +1601,4 @@ if (MODE === 'mcp') {
   bridge.startHeartbeat();
   startResidentStdio();
   console.error('[bridge] resident server ready on ' + WS_HOST + ':' + WS_PORT);
-  // 指令18 A5：魔搭 8h 结构守护（常驻侧，页面关了也活；server.js.bak_pre18 是改动前备份）
-  try {
-    const guard = require('./a5_guard.js');
-    guard.start().catch((e) => console.error('[a5] guard crashed:', e && e.message));
-    console.error('[bridge] a5_guard started');
-  } catch (e) {
-    console.error('[bridge] a5_guard load failed:', e && e.message);
-  }
 }

@@ -4,10 +4,16 @@ Edge reads HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts
 Chrome reads HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts
 
 Usage:
+  python register_nmh.py --init <EXTENSION_ID>   # write ext_bridge.json first
   python register_nmh.py            # register for Edge + Chrome
   python register_nmh.py --status   # show current registration
   python register_nmh.py --remove   # delete the keys
+
+The extension ID appears on edge://extensions (or chrome://extensions) under
+the loaded "OpenCode Browser Bridge" card. --init writes the NM manifest that
+locks host launching to THAT extension id only.
 """
+import json
 import os
 import sys
 import winreg
@@ -22,13 +28,32 @@ ROOTS = (
 )
 
 
+def init_manifest(ext_id):
+    if not ext_id or len(ext_id) < 20:
+        raise SystemExit("--init needs the extension id from edge://extensions "
+                         "(32 lowercase letters, e.g.abcdefgh...)")
+    doc = {
+        "name": NAME,
+        "description": "Native messaging host for the OpenCode Browser Bridge",
+        "path": os.path.join(DIR, "native-host.bat"),
+        "type": "stdio",
+        "allowed_origins": ["chrome-extension://%s/" % ext_id],
+    }
+    with open(MANIFEST, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+    print("wrote %s (allowed_origins: %s)" % (MANIFEST, doc["allowed_origins"][0]))
+
+
 def ensure_key(root, sub):
     winreg.CreateKeyEx(root, sub, 0, winreg.KEY_SET_VALUE)
 
 
 def register():
     if not os.path.exists(MANIFEST):
-        raise SystemExit("manifest missing: " + MANIFEST)
+        raise SystemExit(
+            "manifest missing: " + MANIFEST +
+            "\nRun first:  python register_nmh.py --init <EXTENSION_ID>"
+            "\n(see edge://extensions for the id)")
     for label, root, sub in ROOTS:
         try:
             with winreg.CreateKeyEx(root, sub + "\\" + NAME, 0, winreg.KEY_SET_VALUE) as k:
@@ -65,6 +90,9 @@ if __name__ == "__main__":
     if arg == "--remove":
         remove()
     elif arg == "--status":
+        status()
+    elif arg == "--init":
+        init_manifest(sys.argv[2] if len(sys.argv) > 2 else "")
         status()
     else:
         register()

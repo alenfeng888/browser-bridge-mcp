@@ -13,7 +13,8 @@ AI chat consoles, internal tools - without touching any credentials.
 
 ## Architecture
 
-Two live transports + one fallback, auto-degrading in order `queue -> ws -> cli`:
+Two live transports (queue + native messaging); the old WebSocket leg is
+disabled by default (see Security). Auto-degrading order `queue -> ws -> cli`:
 
 ```
 1. queue  AI/MCP ──stdio──> server.js ──HTTP long-poll──> service worker ──> chrome.*
@@ -21,11 +22,14 @@ Two live transports + one fallback, auto-degrading in order `queue -> ws -> cli`
                             (commands queue server-side; nothing lost while the
                              MV3 service worker sleeps)  ← primary, most reliable
 
-2. ws     AI/MCP ──stdio──> server.js ──WS :18795──> any connected extension client
-                            (lowest latency; available when a WS client is attached)
+2. ws     AI/MCP ──stdio──> server.js ──WS :18795──> extension socket
+                            (LEGACY, rejected by default: the extension has not
+                             used it since 0.3.7 and the handshake cannot carry
+                             a credential; set EXT_BRIDGE_ALLOW_WS=1 to re-enable)
 
 3. cli    CLI ──8766──> serve.py ──8765──> native-host.bat ──> host.py ──(NM)──> background.js
-                            (fallback via native messaging; independent of server.js)
+                            (fallback via native messaging; independent of server.js;
+                             BOTH ports require the bridge token since 0.4.1)
 ```
 
 Health check:
@@ -42,7 +46,7 @@ curl http://127.0.0.1:18795/health
 ## One file, four roles
 
 ```
-node server.js        # resident service (kept alive; watchable via watchdog.js)
+node server.js        # resident service (run it under any supervisor you like)
 node server.js mcp    # MCP stdio bridge -> attach to resident  (MCP clients use this)
 node server.js list   # one-shot CLI  -> attach to resident
 node server.js status # connection status
@@ -68,10 +72,20 @@ checks in, then lock down permanently.
 
 ### 2. Register the native messaging host (CLI fallback path)
 
+Load the extension first (step 3) and copy its ID from `edge://extensions`, then:
+
 ```
-python register_nmh.py            # writes HKCU keys for Edge + Chrome
+python register_nmh.py --init <EXTENSION_ID>   # writes ext_bridge.json (gitignored)
+python register_nmh.py                          # writes HKCU keys for Edge + Chrome
 python register_nmh.py --status
 ```
+
+The generated `ext_bridge.json` locks native-host launching to your extension
+ID. Moving the `extension/` folder changes the ID - re-run both commands.
+
+The CLI router itself is optional (the queue transport does not need it):
+`python -u serve.py serve` (needs `~/.ext_bridge_token` to exist - the resident
+server creates it on first start).
 
 ### 3. Load the extension
 
@@ -165,20 +179,49 @@ python -u selftest_e2e.py                   # fake-extension loopback (native ms
 
 ## Security
 
-- All listeners bind `127.0.0.1` only
-- `/tool` (arbitrary JS, cookies, screenshots) requires `x-bridge-token`;
-  the token auto-generates into `~/.ext_bridge_token` (0600)
-- `/extension/*` is gated by the paired secret from `scripts/pair.ps1`;
-  it self-arms: until the first correctly paired extension checks in,
-  unauthenticated calls are honoured (compat with not-yet-reloaded extensions),
-  then the endpoint locks permanently
-- The native-messaging host allowlist locks the extension ID
-- The extension can access everything in your browser (including logins) -
-  use it on your own machine only; remove it in `edge://extensions` to cut access
+Threat model in one line: this tool hands your logged-in browser to whatever
+holds a local token. Everything below aims to stop **drive-by callers** (port
+scanners, npm postinstall scripts, malicious web pages) - not a determined
+attacker running as your own user.
 
-These are speed bumps, not defenses: any local process can read the token
-files. The goal is to stop drive-by callers (port scans, npm postinstall
-scripts), not a determined local attacker.
+- All listeners bind `127.0.0.1` only; nothing is reachable from the network.
+- `/tool` (arbitrary JS in your tabs, screenshots) requires `x-bridge-token`;
+  the token auto-generates into `~/.ext_bridge_token` (0600 on POSIX, default
+  per-user ACL on Windows).
+- `/extension/*` (the queue endpoints the extension polls) is gated by the
+  paired secret from `scripts/pair.ps1`. Unpaired fresh installs keep these
+  endpoints open (loudly logged); once paired, unauthenticated calls are
+  accepted only during a 180 s startup grace window (so a slow-to-wake
+  extension survives a server restart) and rejected for good afterwards - or
+  immediately once the extension has checked in.
+- Since 0.4.1 the serve.py CLI/native ports (8766/8765) are token-gated too:
+  every CLI request carries the token and native hosts must say hello with it.
+  `serve.py serve` refuses to start without a token.
+- The WebSocket upgrade on :18795 is refused by default (426): the extension
+  stopped using it in 0.3.7 and a WS handshake cannot carry a credential.
+- Cookie reads (native CLI path) return name/domain/path only - values never
+  leave the extension.
+- The native-messaging host allowlist (`ext_bridge.json`, generated by
+  `register_nmh.py --init`) locks host launching to your extension ID.
+- Web pages cannot reach the extension (no content scripts, no
+  externally_connectable) nor the token-gated endpoints (browsers send a real
+  `Origin`; the queue accepts the extension's `chrome-extension://` origin or
+  the paired secret only).
+- The extension can access everything in your browser (including logins) -
+  use it on your own machine only; remove it in `edge://extensions` to cut access.
+
+These are speed bumps, not defenses: any process running as you can read the
+token files and take over the browser - that is inherent to a local bridge and
+is out of scope. Residual local races (e.g. binding a port before the real
+owner) exist for the same reason.
+
+### Hardening notes (0.4.1)
+
+- Removed: unused `storage` permission, the ModelScope-specific `k13_exec` tool,
+  and the unauthenticated WebSocket accept path.
+- Cookie values are stripped in the extension (`bridge-core.js`), not just in
+  the CLI printer.
+- An unset `EXT_BRIDGE_ORIGIN` no longer matches empty-`Origin` requests.
 
 ## Known limitations
 
