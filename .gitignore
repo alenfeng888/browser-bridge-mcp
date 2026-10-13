@@ -1,0 +1,8 @@
+node_modules/
+extension/config.js
+*.log
+*.png
+*.bak*
+__pycache__/
+server.log
+serve.log

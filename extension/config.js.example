@@ -1,0 +1,7 @@
+// Copy this file to extension/config.js (or run scripts/pair.ps1 which
+// generates it for you) and edit the values to match your setup.
+// This file is gitignored - it carries a per-install shared secret.
+const BRIDGE_CONFIG = {
+  httpBase: 'http://127.0.0.1:18795', // where server.js listens
+  extToken: 'REPLACE_WITH_RANDOM_HEX' // same value as ~/.ext_bridge_ext_token
+};

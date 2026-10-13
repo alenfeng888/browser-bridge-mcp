@@ -1,0 +1,15 @@
+{
+  "name": "browser-bridge-mcp",
+  "version": "0.4.0",
+  "description": "Let AI agents drive your REAL browser (same instance, same cookies) over MCP - works with any stdio MCP client (OpenCode, Claude Code, Cursor, ZCode, TRAE, ...). Node server + Edge/Chrome extension, zero npm dependencies.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "pair": "powershell -ExecutionPolicy Bypass -File scripts/pair.ps1",
+    "selftest": "node selftest_mcp.js browser_list_tabs {}"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

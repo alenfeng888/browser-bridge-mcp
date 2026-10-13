@@ -1,0 +1,13 @@
+<!doctype html><html><head><meta charset="utf-8"><title>P0 regress</title></head>
+<body style="font-family:monospace;font-size:16px;padding:24px">
+<h3>P0 regress</h3>
+<input id="box" name="p0box" placeholder="type here" style="width:300px">
+<button id="add" onclick="clicked()">ADD</button>
+<button id="delay" onclick="delayed()">DELAY-5s</button>
+<pre id="status">status: clicked:0 typed:</pre>
+<script>
+var n=0;
+function clicked(){n++;document.getElementById('status').textContent='status: clicked:'+n+' typed:'+document.getElementById('box').value;}
+document.getElementById('box').addEventListener('input',function(){document.getElementById('status').textContent='status: clicked:'+n+' typed:'+this.value;});
+function delayed(){setTimeout(function(){var d=document.createElement('div');d.id='late';d.textContent='READY-XYZ arrived';document.body.appendChild(d);},5000);}
+</script></body></html>

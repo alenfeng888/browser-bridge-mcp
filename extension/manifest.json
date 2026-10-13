@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "OpenCode Browser Bridge",
+  "version": "0.3.7",
+  "description": "Bridge for AI to control your real browser (same instance, same cookies).",
+  "permissions": ["tabs", "scripting", "storage", "alarms", "cookies", "nativeMessaging", "debugger"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1/*", "http://localhost/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "OpenCode Browser Bridge",
+    "default_popup": "popup.html"
+  }
+}
